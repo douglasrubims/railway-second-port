@@ -1,6 +1,6 @@
-# Expose Private Port
+# Second Port
 
-A [Caddy](https://caddyserver.com/) reverse proxy for Railway that exposes a second port from a service on its own public domain.
+A [Caddy](https://caddyserver.com/) reverse proxy that exposes a second port from a service on its own public domain.
 
 Railway assigns one `.up.railway.app` domain per service. When a container exposes multiple ports (for example, an app on `3000` and an admin UI on `8080`), only one port can be attached to that public domain. Deploy this proxy as a separate service to give the second port its own public URL while forwarding traffic over Railway's private network.
 
