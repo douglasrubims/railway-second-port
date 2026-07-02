@@ -1,5 +1,7 @@
 FROM caddy:latest
 
+EXPOSE 3000
+
 WORKDIR /app
 
 COPY Caddyfile ./

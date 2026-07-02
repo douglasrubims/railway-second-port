@@ -27,8 +27,8 @@
 	unhealthy_request_count 200
 }
 
-# site block, listens on the $PORT environment variable, automatically assigned by railway
-:{$PORT} {
+# site block, listens on a fixed port (configure Railway networking to match)
+:3000 {
 	# access logs
 	log {
 		format json # set access log format to json mode
