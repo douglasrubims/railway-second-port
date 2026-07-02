@@ -1,56 +1,124 @@
-# [Caddy](https://caddyserver.com/) Frontend & Backend Reverse Proxy
+# Expose Private Port
 
-**Combine your separate frontend and backend services into one domain!**
+A [Caddy](https://caddyserver.com/) reverse proxy for Railway that exposes a second port from a service on its own public domain.
 
-### [View the example public project here](https://railway.app/project/35d8d571-4313-4049-9699-4e7db7f02a2f) - Utilizes sleeping frontend and backend services with wake via the private network
+Railway assigns one `.up.railway.app` domain per service. When a container exposes multiple ports (for example, an app on `3000` and an admin UI on `8080`), only one port can be attached to that public domain. Deploy this proxy as a separate service to give the second port its own public URL while forwarding traffic over Railway's private network.
 
-Access the frontend from `/*` and access the backend from `/api/*` on the same domain
+## Overview
 
-**Frontend - Vue 3:** https://mysite.up.railway.app/
+This project runs Caddy as a lightweight proxy service on Railway. It listens on the platform-assigned `PORT`, accepts public HTTPS traffic on a dedicated Railway domain, and forwards every request to a target service port reachable via `RAILWAY_PRIVATE_DOMAIN`.
 
-**Backend - Go Mux:** https://mysite.up.railway.app/api/
+Typical use case:
 
-The proxy configurations are done in the [`Caddyfile`](https://github.com/brody192/reverse-proxy/blob/main/Caddyfile) everything is commented for your ease of use!
+- **Main service** — port `3000` on `https://myapp.up.railway.app`
+- **This proxy** — port `8080` on `https://myapp-admin.up.railway.app`
 
-When deploying your Reverse Proxy service it will require you to set four service variables: **FRONTEND_DOMAIN** / **FRONTEND_PORT** and **BACKEND_DOMAIN** / **BACKEND_PORT**
+Both point at the same Railway service; the proxy reaches the second port through private networking.
 
-**Note:** You will first need to have set a fixed `PORT` variable in both the frontend and backend services before deploying this template.
-
-These are the four template variables that you will be required to fill out during the first deployment of this service, it is highly recommended to use [reference variables](https://docs.railway.app/guides/variables#referencing-another-services-variable).
-
-Example:
+## Architecture
 
 ```
-FRONTEND_DOMAIN = ${{Frontend.RAILWAY_PRIVATE_DOMAIN}}
-FRONTEND_PORT = ${{Frontend.PORT}}
-
-BACKEND_DOMAIN = ${{Backend.RAILWAY_PRIVATE_DOMAIN}}
-BACKEND_PORT = ${{Backend.PORT}}
+Internet
+   │
+   ▼
+┌─────────────────────────────┐
+│  Proxy service (this repo)  │  ← public .up.railway.app domain #2
+│  Caddy on $PORT             │
+└──────────────┬──────────────┘
+               │ Railway private network (IPv6)
+               ▼
+┌─────────────────────────────┐
+│  Target service             │  ← public .up.railway.app domain #1
+│  Container with 2+ ports    │
+│  TARGET_PORT (e.g. 8080)    │
+└─────────────────────────────┘
 ```
 
-**Relevant Caddy documentation:**
+The proxy configuration lives in [`Caddyfile`](./Caddyfile). Runtime wiring is handled by [`entrypoint.sh`](./entrypoint.sh).
 
-- [The Caddyfile](https://caddyserver.com/docs/caddyfile)
-- [Caddyfile Directives](https://caddyserver.com/docs/caddyfile/directives)
-- [reverse_proxy](https://caddyserver.com/docs/caddyfile/directives/reverse_proxy)
+## Components
 
-**Some prerequisites to help with common issues that could arise:**
+### Caddyfile
 
-- Both the frontend and backend need to listen on fixed ports, in my example project I have configured my frontend and backend to both listen on port `3000`
-    - This can be done by [configuring your frontend and backend apps to listen on the `$PORT`](https://docs.railway.app/troubleshoot/fixing-common-errors) environment variable, then setting a `PORT` service variable to `3000`
+Defines global Railway-friendly settings (no admin API, no auto HTTPS, trusted private proxies) and a single `reverse_proxy` block that resolves the target through dynamic DNS (`dynamic a`) so replica scaling and private-network DNS updates are handled automatically.
 
-- Since Railway's internal network is IPv6 only the frontend and backend apps will need to listen on `::` (all interfaces, both IPv4 and IPv6)
+### entrypoint.sh
 
-    **Start commands for some popular frameworks:**
+Reads `TARGET_DOMAIN` and `TARGET_PORT` from the environment (or parses them from `TARGET_HOST` in `host:port` form) and starts Caddy.
 
-    - **Gunicorn:** `gunicorn main:app -b [::]:${PORT:-3000}`
+### Dockerfile
 
-    - **Uvicorn:** `uvicorn main:app --host :: --port ${PORT:-3000}`
+Builds from the official `caddy:latest` image, formats the Caddyfile, and runs the entrypoint script.
 
-        - Uvicorn does not support dual-stack binding (IPv6 and IPv4) from the CLI, so while that start command will work to enable access from within the private network, this prevents you from accessing the app from the public domain if needed, I recommend using [Hypercorn](https://pgjones.gitlab.io/hypercorn/) instead
+## Deployment
 
-    - **Hypercorn:** `hypercorn main:app --bind [::]:${PORT:-3000}`
+### 1. Prepare the target service
 
-    - **Next:** `next start -H :: --port ${PORT:-3000}`
+The service you want to expose must:
 
-    - **Express/Nest:** `app.listen(process.env.PORT || 3000, "::");`
+- Listen on a **fixed port** for the second endpoint (set a `PORT` or additional port variable as needed).
+- Bind to **`::`** (all interfaces) so it is reachable on Railway's IPv6-only private network.
+
+Example start commands:
+
+- **Gunicorn:** `gunicorn main:app -b [::]:${ADMIN_PORT:-8080}`
+- **Uvicorn:** `uvicorn admin:app --host :: --port ${ADMIN_PORT:-8080}`
+- **Hypercorn:** `hypercorn admin:app --bind [::]:${ADMIN_PORT:-8080}`
+- **Express/Nest:** `app.listen(process.env.ADMIN_PORT || 8080, "::");`
+
+The main public domain can continue to use the service's primary port as usual.
+
+### 2. Deploy this proxy service
+
+Create a new Railway service from this repository and set:
+
+| Variable | Description | Example |
+|----------|-------------|---------|
+| `TARGET_DOMAIN` | Private hostname of the target service | `${{MyService.RAILWAY_PRIVATE_DOMAIN}}` |
+| `TARGET_PORT` | Port to expose publicly | `8080` |
+
+Use [reference variables](https://docs.railway.app/guides/variables#referencing-another-services-variable) to point at the service that owns the container:
+
+```
+TARGET_DOMAIN = ${{MyService.RAILWAY_PRIVATE_DOMAIN}}
+TARGET_PORT = 8080
+```
+
+Alternatively, pass both in one variable:
+
+```
+TARGET_HOST = ${{MyService.RAILWAY_PRIVATE_DOMAIN}}:8080
+```
+
+### 3. Assign a public domain
+
+Generate a public domain for **this proxy service** in the Railway dashboard. All paths and methods are forwarded unchanged to the target port.
+
+## Style
+
+No application UI is included. The proxy preserves request paths, query strings, headers, and WebSocket upgrades supported by Caddy's `reverse_proxy` directive.
+
+## Test
+
+After deployment:
+
+1. Confirm the target service responds on the chosen port over the private network (check target service logs).
+2. Open the proxy service's public URL and verify the expected response.
+3. Inspect proxy logs in Railway for JSON access and runtime entries.
+
+## Maintenance
+
+- **Target unreachable:** Ensure the target binds to `::`, uses a fixed port, and `TARGET_DOMAIN` / `TARGET_PORT` reference the correct service.
+- **502 / unhealthy upstream:** The Caddyfile includes passive health checks and retries for cold starts and replica wake-up; increase `lb_try_duration` in the Caddyfile if needed.
+- **Wrong Host header:** The proxy sets `Host` to `{upstream_hostport}` for private-network upstreams; adjust `header_up` in the Caddyfile if your app expects a different host.
+
+## Relevant documentation
+
+- [Railway private networking](https://docs.railway.app/guides/private-networking)
+- [Railway service variables](https://docs.railway.app/guides/variables)
+- [Caddy reverse_proxy](https://caddyserver.com/docs/caddyfile/directives/reverse_proxy)
+- [Caddy dynamic upstreams](https://caddyserver.com/docs/caddyfile/directives/reverse_proxy#dynamic)
+
+## License
+
+See [LICENSE](./LICENSE).
